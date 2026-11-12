@@ -1,0 +1,9 @@
+{
+  "api_key": "YOUR_EMPLOYEE_API_KEY_HERE",
+  "publishable_key": "YOUR_SUPABASE_PUBLISHABLE_KEY",
+  "api_url": "https://xcntwkimnwhedfmqhtcj.supabase.co/functions/v1",
+  "activity_interval": 30,
+  "screenshot_interval": 300,
+  "idle_threshold": 300,
+  "screenshot_quality": 60
+}

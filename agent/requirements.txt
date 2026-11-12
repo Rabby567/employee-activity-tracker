@@ -1,0 +1,5 @@
+requests>=2.31.0
+pywin32>=306
+pynput>=1.7.6
+Pillow>=10.0.0
+pystray>=0.19.5

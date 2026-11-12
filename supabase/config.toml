@@ -1,0 +1,16 @@
+project_id = "xcntwkimnwhedfmqhtcj"
+
+[functions.log-activity]
+verify_jwt = false
+
+[functions.upload-screenshot]
+verify_jwt = false
+
+[functions.agent-request]
+verify_jwt = false
+
+[functions.check-permission]
+verify_jwt = false
+
+[functions.agent-config]
+verify_jwt = false

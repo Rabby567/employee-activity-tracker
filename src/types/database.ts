@@ -18,7 +18,9 @@ export interface ActivityLog {
   id: string;
   employee_id: string;
   app_name: string;
-  status: 'working' | 'idle';
+  window_title?: string | null;
+  website_domain?: string | null;
+  status: 'working' | 'unproductive' | 'idle';
   duration_seconds: number;
   created_at: string;
 }

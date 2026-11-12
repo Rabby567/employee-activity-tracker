@@ -11,7 +11,6 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { format, subDays, startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth, eachDayOfInterval } from 'date-fns';
 import { CalendarIcon, Download, Clock, TrendingUp, BarChart3, PieChartIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { isProductiveApp } from '@/lib/productiveApps';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
  // Vibrant colors for application usage chart
@@ -61,12 +60,12 @@ const normalizeAppName = (appName: string): string => {
    
   // Common browser patterns - extract browser name
   const browserPatterns = [
-    { pattern: /Google Chrome/i, name: 'Google Chrome' },
-    { pattern: /Mozilla Firefox/i, name: 'Mozilla Firefox' },
-    { pattern: /Microsoft Edge/i, name: 'Microsoft Edge' },
+    { pattern: /Google Chrome|chrome\.exe/i, name: 'Google Chrome' },
+    { pattern: /Mozilla Firefox|firefox\.exe/i, name: 'Mozilla Firefox' },
+    { pattern: /Microsoft Edge|msedge\.exe/i, name: 'Microsoft Edge' },
     { pattern: /Safari/i, name: 'Safari' },
-    { pattern: /Opera/i, name: 'Opera' },
-    { pattern: /Brave/i, name: 'Brave' },
+    { pattern: /Opera|opera\.exe/i, name: 'Opera' },
+    { pattern: /Brave|brave\.exe/i, name: 'Brave' },
   ];
   
   for (const { pattern, name } of browserPatterns) {
@@ -75,12 +74,12 @@ const normalizeAppName = (appName: string): string => {
   
   // Common application patterns
   const appPatterns = [
-    { pattern: /Adobe Photoshop/i, name: 'Adobe Photoshop' },
-    { pattern: /Adobe Illustrator/i, name: 'Adobe Illustrator' },
+    { pattern: /Adobe Photoshop|Photoshop\.exe/i, name: 'Adobe Photoshop' },
+    { pattern: /Adobe Illustrator|Illustrator\.exe/i, name: 'Adobe Illustrator' },
     { pattern: /Adobe Premiere/i, name: 'Adobe Premiere' },
     { pattern: /Adobe After Effects/i, name: 'Adobe After Effects' },
     { pattern: /Adobe XD/i, name: 'Adobe XD' },
-    { pattern: /Adobe InDesign/i, name: 'Adobe InDesign' },
+    { pattern: /Adobe InDesign|InDesign\.exe/i, name: 'Adobe InDesign' },
     { pattern: /Figma/i, name: 'Figma' },
     { pattern: /Sketch/i, name: 'Sketch' },
     { pattern: /Discord/i, name: 'Discord' },
@@ -154,7 +153,7 @@ export default function Analytics() {
     }
   }, [dateRange, customStart, customEnd]);
 
-  const { logs, appUsage, dailyBreakdown, totalWorkingTime, totalIdleTime } = useActivityLogs({
+  const { logs, appUsage, websiteUsage, employeeBreakdown, dailyBreakdown, totalWorkingTime, totalIdleTime, totalUnproductiveTime, totalTrackedTime } = useActivityLogs({
     employeeId: selectedEmployee === 'all' ? undefined : selectedEmployee,
     startDate,
     endDate
@@ -195,9 +194,9 @@ export default function Analytics() {
 
   // Prepare chart data
   // Group by normalized app names
-  const normalizedAppUsage = logs.reduce((acc, log) => {
-    const normalizedName = normalizeAppName(log.app_name);
-    acc[normalizedName] = (acc[normalizedName] || 0) + log.duration_seconds;
+  const normalizedAppUsage = Object.entries(appUsage || {}).reduce((acc, [appName, seconds]) => {
+    const normalizedName = normalizeAppName(appName);
+    acc[normalizedName] = (acc[normalizedName] || 0) + Number(seconds || 0);
     return acc;
   }, {} as Record<string, number>);
 
@@ -206,13 +205,19 @@ export default function Analytics() {
     .slice(0, 8)
     .map(([name, value]) => ({ name: name.slice(0, 15), value, hours: (value / 3600).toFixed(1) }));
 
+  const websiteUsageData = Object.entries(websiteUsage || {})
+    .sort(([, a], [, b]) => Number(b) - Number(a))
+    .slice(0, 10)
+    .map(([name, value]) => ({ name: name.slice(0, 32), value: Number(value) }));
+
   const productivityData = [
-    { name: 'Working', value: totalWorkingTime, color: '#10B981' },
+    { name: 'Productive', value: totalWorkingTime, color: '#10B981' },
+    { name: 'Unproductive', value: totalUnproductiveTime, color: '#EF4444' },
     { name: 'Idle', value: totalIdleTime, color: '#F59E0B' }
   ];
 
-  const productivityScore = totalWorkingTime + totalIdleTime > 0
-    ? Math.round((totalWorkingTime / (totalWorkingTime + totalIdleTime)) * 100)
+  const productivityScore = totalTrackedTime > 0
+    ? Math.round((totalWorkingTime / totalTrackedTime) * 100)
     : 0;
 
   // Daily breakdown - uses server-side aggregated data (no row limit)
@@ -223,11 +228,11 @@ export default function Analytics() {
     const useShortLabel = dateRange === 'today' || interval.length <= 7;
     
     // Pre-populate all days with zero values in chronological order
-    const dayMap = new Map<string, { name: string; working: number; idle: number }>();
+    const dayMap = new Map<string, { name: string; working: number; unproductive: number; idle: number }>();
     interval.forEach(date => {
       const key = format(date, 'yyyy-MM-dd');
       const label = useShortLabel ? format(date, 'EEE') : format(date, 'MMM dd');
-      dayMap.set(key, { name: label, working: 0, idle: 0 });
+      dayMap.set(key, { name: label, working: 0, unproductive: 0, idle: 0 });
     });
     
     // Fill in data from server-side daily breakdown (aggregates ALL rows, no limit)
@@ -235,46 +240,31 @@ export default function Analytics() {
       const entry = dayMap.get(day.date);
       if (!entry) return;
       entry.working += (day.working_seconds || 0) / 3600;
+      entry.unproductive += (day.unproductive_seconds || 0) / 3600;
       entry.idle += (day.idle_seconds || 0) / 3600;
     });
     
     return Array.from(dayMap.values()).map(d => ({
       name: d.name,
       working: Number(d.working.toFixed(1)),
+      unproductive: Number(d.unproductive.toFixed(1)),
       idle: Number(d.idle.toFixed(1)),
     }));
   }, [dailyBreakdown, startDate, endDate, dateRange]);
 
-  // Employee productivity ranking
-  const employeeRanking = useMemo(() => {
-    const ranking: Record<string, { working: number; idle: number; name: string }> = {};
-    
-    logs.forEach(log => {
-      const emp = employees.find(e => e.id === log.employee_id);
-      if (!emp) return;
-      
-      if (!ranking[log.employee_id]) {
-        ranking[log.employee_id] = { working: 0, idle: 0, name: emp.name };
-      }
-      
-      if (isProductiveApp(log.app_name)) {
-        ranking[log.employee_id].working += log.duration_seconds;
-      } else {
-        ranking[log.employee_id].idle += log.duration_seconds;
-      }
-    });
-
-    return Object.entries(ranking)
-      .map(([id, data]) => ({
-        id,
-        name: data.name,
-        score: data.working + data.idle > 0
-          ? Math.round((data.working / (data.working + data.idle)) * 100)
-          : 0,
-        hours: (data.working / 3600).toFixed(1)
-      }))
-      .sort((a, b) => b.score - a.score);
-  }, [logs, employees]);
+  // Ranking uses server-side aggregates for every activity row, not the 5,000-row UI log window.
+  const employeeRanking = useMemo(() => (employeeBreakdown || [])
+    .map(data => {
+      const emp = employees.find(e => e.id === data.employee_id);
+      const total = data.working_seconds + data.unproductive_seconds + data.idle_seconds;
+      return {
+        id: data.employee_id,
+        name: emp?.name || 'Unknown',
+        score: total > 0 ? Math.round((data.working_seconds / total) * 100) : 0,
+        hours: (data.working_seconds / 3600).toFixed(1),
+      };
+    })
+    .sort((a, b) => b.score - a.score), [employeeBreakdown, employees]);
 
   const exportToCSV = () => {
     const headers = ['Employee', 'App', 'Status', 'Duration (seconds)', 'Timestamp'];
@@ -360,7 +350,7 @@ export default function Analytics() {
         </div>
 
         {/* Overview Stats */}
-        <div className="grid gap-4 md:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-5">
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center gap-3">
@@ -369,7 +359,7 @@ export default function Analytics() {
                 </div>
                 <div>
                   <p className="text-sm text-muted-foreground">Total Hours</p>
-                  <p className="text-2xl font-bold">{formatHours(totalWorkingTime + totalIdleTime)}h</p>
+                  <p className="text-2xl font-bold">{formatHours(totalTrackedTime)}h</p>
                 </div>
               </div>
             </CardContent>
@@ -390,8 +380,21 @@ export default function Analytics() {
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center gap-3">
+                <div className="rounded-full bg-red-500/10 p-3">
+                  <BarChart3 className="h-5 w-5 text-red-600" />
+                </div>
+                <div>
+                  <p className="text-sm text-muted-foreground">Unproductive Time</p>
+                  <p className="text-2xl font-bold">{formatHours(totalUnproductiveTime)}h</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="pt-6">
+              <div className="flex items-center gap-3">
                 <div className="rounded-full bg-amber-500/10 p-3">
-                  <BarChart3 className="h-5 w-5 text-amber-600" />
+                  <Clock className="h-5 w-5 text-amber-600" />
                 </div>
                 <div>
                   <p className="text-sm text-muted-foreground">Idle Time</p>
@@ -431,7 +434,8 @@ export default function Analytics() {
                     <YAxis label={{ value: 'Hours', angle: -90, position: 'insideLeft' }} />
                     <Tooltip />
                     <Legend />
-                    <Bar dataKey="working" name="Working" fill="#10B981" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="working" name="Productive" fill="#10B981" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="unproductive" name="Unproductive" fill="#EF4444" radius={[4, 4, 0, 0]} />
                     <Bar dataKey="idle" name="Idle" fill="#F59E0B" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
@@ -441,10 +445,10 @@ export default function Analytics() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Working vs Idle Distribution</CardTitle>
+              <CardTitle>Productive vs Unproductive vs Idle</CardTitle>
             </CardHeader>
             <CardContent>
-              {totalWorkingTime === 0 && totalIdleTime === 0 ? (
+              {totalWorkingTime === 0 && totalIdleTime === 0 && totalUnproductiveTime === 0 ? (
                 <p className="text-muted-foreground text-center py-8">No data for selected period</p>
               ) : (
                 <ResponsiveContainer width="100%" height={300}>
@@ -508,6 +512,26 @@ export default function Analytics() {
           </Card>
         </div>
         
+        <div className="grid gap-4 lg:grid-cols-1">
+          <Card>
+            <CardHeader><CardTitle>Website Usage Time</CardTitle></CardHeader>
+            <CardContent>
+              {websiteUsageData.length === 0 ? (
+                <p className="text-muted-foreground text-center py-8">No browser domain data. Install the ActivityTrack Website Companion in Chrome or Edge.</p>
+              ) : (
+                <ResponsiveContainer width="100%" height={300}>
+                  <BarChart data={websiteUsageData}>
+                    <XAxis dataKey="name" angle={-25} textAnchor="end" height={70} interval={0}/>
+                    <YAxis tickFormatter={(v) => `${(v / 3600).toFixed(1)}h`}/>
+                    <Tooltip formatter={(value: number) => [formatDuration(value), 'Time Used']}/>
+                    <Bar dataKey="value" name="Website Time" fill="#3B82F6" radius={[4, 4, 0, 0]}/>
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+
         <div className="grid gap-4 lg:grid-cols-1">
           <Card>
             <CardHeader>

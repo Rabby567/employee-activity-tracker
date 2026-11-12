@@ -18,6 +18,7 @@ export type Database = {
         Row: {
           app_name: string
           window_title: string | null
+          website_domain: string | null
           created_at: string
           duration_seconds: number | null
           employee_id: string
@@ -27,6 +28,7 @@ export type Database = {
         Insert: {
           app_name: string
           window_title?: string | null
+          website_domain?: string | null
           created_at?: string
           duration_seconds?: number | null
           employee_id: string
@@ -35,6 +37,8 @@ export type Database = {
         }
         Update: {
           app_name?: string
+          window_title?: string | null
+          website_domain?: string | null
           created_at?: string
           duration_seconds?: number | null
           employee_id?: string
@@ -244,6 +248,7 @@ export type Database = {
           p_employee_id?: string
           p_end_date?: string
           p_start_date?: string
+          p_timezone?: string
         }
         Returns: Json
       }

@@ -40,7 +40,7 @@ export default function EmployeeDetail() {
       ? employee.status
       : 'offline';
 
-  const { logs, appUsage, totalWorkingTime, totalIdleTime } = useActivityLogs({ employeeId: id });
+  const { logs, appUsage, websiteUsage, totalWorkingTime, totalIdleTime, totalUnproductiveTime } = useActivityLogs({ employeeId: id });
   const { screenshots, getSignedUrl } = useScreenshots({ employeeId: id });
   const [screenshotUrls, setScreenshotUrls] = useState<Record<string, string>>({});
 
@@ -172,9 +172,14 @@ export default function EmployeeDetail() {
     .map(([name, value]) => ({ name, value }));
 
   const timeData = [
-    { name: 'Working', value: totalWorkingTime },
-    { name: 'Idle', value: totalIdleTime }
+    { name: 'Productive', value: totalWorkingTime, color: '#10B981' },
+    { name: 'Unproductive', value: totalUnproductiveTime, color: '#EF4444' },
+    { name: 'Idle', value: totalIdleTime, color: '#F59E0B' }
   ];
+  const websiteUsageData = Object.entries(websiteUsage || {})
+    .sort(([, a], [, b]) => Number(b) - Number(a))
+    .slice(0, 8)
+    .map(([name, value]) => ({ name, value: Number(value) }));
 
   if (loading) {
     return (
@@ -359,7 +364,7 @@ export default function EmployeeDetail() {
                           </p>
                         </div>
                         <div className="text-right">
-                          <StatusBadge status={log.status === 'working' ? 'online' : 'idle'} animated={false} />
+                          <StatusBadge status={log.status === 'working' ? 'online' : log.status === 'idle' ? 'idle' : 'unproductive'} animated={false} />
                           <p className="text-sm text-muted-foreground">{formatDuration(log.duration_seconds)}</p>
                         </div>
                       </div>
@@ -405,10 +410,10 @@ export default function EmployeeDetail() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle>Working vs Idle Time</CardTitle>
+                  <CardTitle>Productive vs Unproductive vs Idle</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  {totalWorkingTime === 0 && totalIdleTime === 0 ? (
+                  {totalWorkingTime === 0 && totalIdleTime === 0 && totalUnproductiveTime === 0 ? (
                     <p className="text-muted-foreground text-center py-8">No data available</p>
                   ) : (
                     <ResponsiveContainer width="100%" height={250}>
@@ -418,9 +423,26 @@ export default function EmployeeDetail() {
                         <Tooltip formatter={(value: number) => formatDuration(value)} />
                         <Bar dataKey="value" radius={[4, 4, 0, 0]}>
                           {timeData.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={index === 0 ? '#10B981' : '#F59E0B'} />
+                            <Cell key={`cell-${index}`} fill={entry.color} />
                           ))}
                         </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader><CardTitle>Website Usage Time</CardTitle></CardHeader>
+                <CardContent>
+                  {websiteUsageData.length === 0 ? (
+                    <p className="text-muted-foreground text-center py-8">No browser domain data. Install the ActivityTrack Website Companion in Chrome or Edge.</p>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={250}>
+                      <BarChart data={websiteUsageData}>
+                        <XAxis dataKey="name" angle={-25} textAnchor="end" height={70} interval={0}/>
+                        <YAxis tickFormatter={(v) => formatDuration(v)}/>
+                        <Tooltip formatter={(value: number) => formatDuration(value)}/>
+                        <Bar dataKey="value" fill="#3B82F6" radius={[4, 4, 0, 0]}/>
                       </BarChart>
                     </ResponsiveContainer>
                   )}

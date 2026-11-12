@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { ActivityLog } from '@/types/database';
 import { useToast } from '@/hooks/use-toast';
-import { isProductiveApp } from '@/lib/productiveApps';
 
 interface UseActivityLogsOptions {
   employeeId?: string;
@@ -14,19 +13,31 @@ interface DailyBreakdownEntry {
   date: string;
   working_seconds: number;
   idle_seconds: number;
+  unproductive_seconds: number;
+}
+
+interface EmployeeBreakdownEntry {
+  employee_id: string;
+  working_seconds: number;
+  unproductive_seconds: number;
+  idle_seconds: number;
 }
 
 interface ActivityStats {
   working_seconds: number;
   idle_seconds: number;
+  unproductive_seconds: number;
+  total_seconds: number;
   app_usage: Record<string, number>;
+  website_usage: Record<string, number>;
+  employee_breakdown: EmployeeBreakdownEntry[];
   daily_breakdown: DailyBreakdownEntry[];
 }
 
 export function useActivityLogs(options: UseActivityLogsOptions = {}) {
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [loading, setLoading] = useState(true);
-  const [stats, setStats] = useState<ActivityStats>({ working_seconds: 0, idle_seconds: 0, app_usage: {}, daily_breakdown: [] });
+  const [stats, setStats] = useState<ActivityStats>({ working_seconds: 0, unproductive_seconds: 0, idle_seconds: 0, total_seconds: 0, app_usage: {}, website_usage: {}, employee_breakdown: [], daily_breakdown: [] });
   const { toast } = useToast();
 
   const fetchStats = async () => {
@@ -34,6 +45,7 @@ export function useActivityLogs(options: UseActivityLogsOptions = {}) {
       p_employee_id: options.employeeId || null,
       p_start_date: options.startDate?.toISOString() || null,
       p_end_date: options.endDate?.toISOString() || null,
+      p_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
     });
 
     if (!error && data) {
@@ -103,9 +115,13 @@ export function useActivityLogs(options: UseActivityLogsOptions = {}) {
     logs,
     loading,
     appUsage: stats.app_usage,
+    websiteUsage: stats.website_usage,
+    employeeBreakdown: stats.employee_breakdown,
     dailyBreakdown: stats.daily_breakdown,
     totalWorkingTime: stats.working_seconds,
     totalIdleTime: stats.idle_seconds,
+    totalUnproductiveTime: stats.unproductive_seconds,
+    totalTrackedTime: stats.total_seconds,
     refetch: () => { fetchLogs(); fetchStats(); }
   };
 }

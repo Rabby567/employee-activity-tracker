@@ -12,11 +12,11 @@ import { useEmployees } from '@/hooks/useEmployees';
 // Agent package is generated here so the downloaded ZIP always matches this release.
 const getAgentFiles = (apiKey?: string) => ({
   'employee_agent.py': `#!/usr/bin/env python3
-"""ActivityTrack visible employee monitoring agent.
+"""ActivityTrack visible employee agent.
 
-Runs in the signed-in Windows desktop session. The organization must disclose
-what activity data and screenshots are collected, why, who can view them, and
-how long they are retained before enabling monitoring.
+The organization must disclose the activity and screenshot monitoring policy.
+The agent reports foreground app/process, browser domain (when the companion
+extension is installed), and keyboard/mouse idle state.
 """
 import io
 import json
@@ -24,15 +24,55 @@ import os
 import threading
 import time
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 import win32gui
+import win32process
+import win32api
 from pynput import mouse, keyboard
 from PIL import Image, ImageGrab
 import pystray
 
 APP_NAME = "ActivityTrack Agent"
-AGENT_VERSION = "1.1.0"
+AGENT_VERSION = "1.2.0"
+BROWSER_BRIDGE_PORT = 8765
+
+
+class BrowserBridgeHandler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self.send_response(204)
+        origin = self.headers.get("Origin", "")
+        if origin.startswith("chrome-extension://") or origin.startswith("moz-extension://"):
+            self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_POST(self):
+        if self.path != "/active-tab":
+            self.send_error(404)
+            return
+        try:
+            length = min(int(self.headers.get("Content-Length", "0")), 4096)
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            domain = str(payload.get("domain", ""))[:253].lower().strip()
+            if domain and not all(ch.isalnum() or ch in ".-" for ch in domain):
+                raise ValueError("Invalid domain")
+            self.server.agent.latest_domain = domain
+            self.server.agent.latest_domain_at = time.monotonic()
+            self.send_response(204)
+            origin = self.headers.get("Origin", "")
+            if origin.startswith("chrome-extension://") or origin.startswith("moz-extension://"):
+                self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.end_headers()
+        except Exception:
+            self.send_error(400)
+
+    def log_message(self, *_args):
+        return
 
 
 class EmployeeAgent:
@@ -42,8 +82,8 @@ class EmployeeAgent:
         self.api_key = self.config["api_key"]
         self.publishable_key = self.config.get("publishable_key", "")
         self.api_url = self.config["api_url"].rstrip("/")
-        self.activity_interval = max(15, int(self.config.get("activity_interval", 30)))
-        self.idle_threshold = max(60, int(self.config.get("idle_threshold", 300)))
+        self.activity_interval = min(300, max(5, int(self.config.get("activity_interval", 30))))
+        self.idle_threshold = min(3600, max(60, int(self.config.get("idle_threshold", 300))))
         self.screenshot_quality = min(90, max(35, int(self.config.get("screenshot_quality", 60))))
         self.screenshot_interval = 300
         self.screenshot_enabled = False
@@ -51,6 +91,9 @@ class EmployeeAgent:
         self.last_capture_request = None
         self.last_screenshot_at = time.monotonic()
         self.last_activity_at = time.monotonic()
+        self.last_heartbeat_sample_at = time.monotonic()
+        self.latest_domain = ""
+        self.latest_domain_at = 0.0
         self.running = threading.Event()
         self.running.set()
         self.session = requests.Session()
@@ -66,7 +109,7 @@ class EmployeeAgent:
         with open(path, "r", encoding="utf-8") as handle:
             cfg = json.load(handle)
         if not cfg.get("api_key") or cfg["api_key"] == "YOUR_EMPLOYEE_API_KEY_HERE":
-            raise RuntimeError("Employee API key is missing from config.json")
+            raise RuntimeError("Employee API Key is missing from config.json")
         if not cfg.get("api_url"):
             raise RuntimeError("Supabase Functions URL is missing from config.json")
         if not cfg.get("publishable_key") or cfg["publishable_key"] == "YOUR_SUPABASE_PUBLISHABLE_KEY":
@@ -79,22 +122,47 @@ class EmployeeAgent:
     def active_window(self):
         try:
             hwnd = win32gui.GetForegroundWindow()
-            return win32gui.GetWindowText(hwnd) or "Unknown"
+            title = win32gui.GetWindowText(hwnd) or "Unknown"
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            process = win32api.OpenProcess(0x0410, False, pid)
+            try:
+                executable = win32process.GetModuleFileNameEx(process, 0)
+                process_name = os.path.basename(executable) or title
+                if process_name.lower() == "explorer.exe" and title.strip().lower() in ("", "program manager"):
+                    process_name = "windows-desktop.exe"
+            finally:
+                win32api.CloseHandle(process)
+            return process_name, title
         except Exception:
-            return "Unknown"
+            try:
+                hwnd = win32gui.GetForegroundWindow()
+                title = win32gui.GetWindowText(hwnd) or "Unknown"
+            except Exception:
+                title = "Unknown"
+            return title, title
 
     def post_activity(self):
-        window = self.active_window()
+        app_name, window_title = self.active_window()
         idle = (time.monotonic() - self.last_activity_at) >= self.idle_threshold
+        sample_now = time.monotonic()
+        elapsed = max(1, round(sample_now - self.last_heartbeat_sample_at))
+        self.last_heartbeat_sample_at = sample_now
+        # Do not invent time across a long sleep/network outage. Each row covers
+        # at most two configured sampling intervals.
+        elapsed = min(elapsed, self.activity_interval)
+        is_browser = app_name.lower().replace('.exe', '') in ('chrome', 'msedge', 'firefox', 'brave', 'opera')
+        fresh_domain = self.latest_domain if time.monotonic() - self.latest_domain_at <= 60 else ""
         payload = {
-            "app_name": window,
-            "window_title": window,
+            "app_name": app_name,
+            "window_title": window_title,
+            "website_domain": fresh_domain if is_browser else "",
             "status": "idle" if idle else "working",
-            "duration_seconds": self.activity_interval,
+            "duration_seconds": elapsed,
         }
         try:
             response = self.session.post(f"{self.api_url}/log-activity", json=payload, timeout=15)
             response.raise_for_status()
+            self.write_log(f"Activity heartbeat recorded: {app_name} / {payload['website_domain'] or 'no browser domain'} / {payload['status']}")
         except requests.RequestException as exc:
             self.write_log(f"Activity heartbeat failed: {exc}")
 
@@ -104,9 +172,10 @@ class EmployeeAgent:
             response.raise_for_status()
             data = response.json()
             was_enabled = self.screenshot_enabled
+            self.activity_interval = min(300, max(5, int(data.get("activity_interval", self.activity_interval))))
+            self.idle_threshold = min(3600, max(60, int(data.get("idle_threshold", self.idle_threshold))))
             self.screenshot_enabled = bool(data.get("screenshot_enabled", False))
             if self.screenshot_enabled and not was_enabled:
-                # Start the 5-minute schedule from the moment admin enables capture.
                 self.last_screenshot_at = time.monotonic()
             self.screenshot_interval = min(3600, max(60, int(data.get("screenshot_interval", 300))))
             self.capture_requested_at = data.get("capture_requested_at")
@@ -154,7 +223,7 @@ class EmployeeAgent:
                     self.upload_screenshot("scheduled")
             except Exception as exc:
                 self.write_log(f"Remote control loop error: {exc}")
-            self.running.wait(30)
+            self.running.wait(15)
 
     def activity_loop(self):
         while self.running.is_set():
@@ -163,6 +232,18 @@ class EmployeeAgent:
             except Exception as exc:
                 self.write_log(f"Activity loop error: {exc}")
             self.running.wait(self.activity_interval)
+
+    def browser_bridge_loop(self):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", BROWSER_BRIDGE_PORT), BrowserBridgeHandler)
+            server.agent = self
+            server.timeout = 1
+            self.write_log(f"Browser domain bridge listening on 127.0.0.1:{BROWSER_BRIDGE_PORT}")
+            while self.running.is_set():
+                server.handle_request()
+            server.server_close()
+        except OSError as exc:
+            self.write_log(f"Browser bridge unavailable: {exc}")
 
     def write_log(self, message):
         log_path = os.path.join(self.base_dir, "agent.log")
@@ -176,7 +257,7 @@ class EmployeeAgent:
         icon_image = Image.new("RGB", (64, 64), color="#16a34a")
         menu = pystray.Menu(
             pystray.MenuItem("ActivityTrack monitoring is active", lambda: None, enabled=False),
-            pystray.MenuItem("Screenshot setting is controlled by your administrator", lambda: None, enabled=False),
+            pystray.MenuItem("Browser domain tracking uses the ActivityTrack extension", lambda: None, enabled=False),
             pystray.MenuItem("Open agent log", self.open_log),
         )
         self.icon = pystray.Icon(APP_NAME, icon_image, "ActivityTrack — Monitoring Active", menu)
@@ -195,6 +276,7 @@ class EmployeeAgent:
         keyboard_listener.start()
         threading.Thread(target=self.activity_loop, name="activity-heartbeat", daemon=True).start()
         threading.Thread(target=self.config_loop, name="remote-settings", daemon=True).start()
+        threading.Thread(target=self.browser_bridge_loop, name="browser-domain-bridge", daemon=True).start()
         try:
             self.create_tray_icon().run()
         finally:
@@ -211,8 +293,9 @@ if __name__ == "__main__":
     except Exception as error:
         log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.log")
         with open(log_file, "a", encoding="utf-8") as handle:
-            handle.write(f"{datetime.now().isoformat(timespec='seconds')} FATAL: {error}\\n")
-        raise`,
+            handle.write(f"{datetime.now().isoformat()} FATAL: {error}\\n")
+        raise
+`,
   'config.json': `{
   "api_key": "${apiKey || 'YOUR_EMPLOYEE_API_KEY_HERE'}",
   "publishable_key": "${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || 'YOUR_SUPABASE_PUBLISHABLE_KEY'}",
@@ -222,6 +305,23 @@ if __name__ == "__main__":
   "idle_threshold": 300,
   "screenshot_quality": 60
 }`,
+  'browser-extension/manifest.json': `{"manifest_version":3,"name":"ActivityTrack Website Companion","version":"1.0.0","description":"Sends the active browser domain to the local ActivityTrack agent.","permissions":["tabs","alarms"],"host_permissions":["http://127.0.0.1:8765/*"],"background":{"service_worker":"service-worker.js"}}`,
+  'browser-extension/service-worker.js': `async function sendActiveDomain() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (!tab?.url) return;
+    const parsed = new URL(tab.url);
+    const domain = ['http:', 'https:'].includes(parsed.protocol) ? parsed.hostname.replace(/^www\\./i, '') : '';
+    await fetch('http://127.0.0.1:8765/active-tab', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain }) });
+  } catch (_) {}
+}
+chrome.runtime.onInstalled.addListener(() => { chrome.alarms.create('activitytrack-domain', { periodInMinutes: 0.5 }); sendActiveDomain(); });
+chrome.runtime.onStartup.addListener(sendActiveDomain);
+chrome.alarms.onAlarm.addListener(sendActiveDomain);
+chrome.tabs.onActivated.addListener(sendActiveDomain);
+chrome.tabs.onUpdated.addListener((_id, changeInfo) => { if (changeInfo.url || changeInfo.status === 'complete') sendActiveDomain(); });
+chrome.windows.onFocusChanged.addListener(sendActiveDomain);`,
+  'browser-extension/README.md': `ActivityTrack Website Companion\n\nStart the employee agent, open chrome://extensions or edge://extensions, enable Developer mode, and choose Load unpacked. Select the browser-extension folder from this package. The extension sends only the active tab hostname to the local agent; page contents, paths and query strings are not collected.`,
   'requirements.txt': `requests>=2.31.0
 pywin32>=306
 pynput>=1.7.6
@@ -352,6 +452,9 @@ Personalized packages downloaded from **ActivityTrack → Agent Download** conta
 2. Make sure Python 3.10+ is installed from https://www.python.org/downloads/ (enable **Add Python to PATH** during installation).
 3. Double-click \`setup.bat\` and allow it to finish installing dependencies.
 4. Confirm the green ActivityTrack icon is visible in the Windows system tray.
+5. For website-level classification, open \`chrome://extensions\` or \`edge://extensions\`, enable Developer mode, choose **Load unpacked**, and select the \`browser-extension\` folder from the extracted ZIP.
+
+The browser companion sends only the active tab hostname to the local agent; it does not collect page contents, paths, or query strings. If it is not installed, browser windows are classified by the Productive Applications allowlist instead of website domain.
 
 The installer copies the package to \`%LOCALAPPDATA%\\ActivityTrackAgent\`, installs Python dependencies, creates a per-user Task Scheduler task, and starts the agent using \`pythonw.exe\`. The agent continues in the background when the setup window is closed. It starts again at the next Windows sign-in and restarts after an unexpected crash.
 
@@ -363,12 +466,13 @@ Run \`turn_off.bat\` from the extracted package or \`%LOCALAPPDATA%\\ActivityTra
 
 ## Data and controls
 
-- Activity heartbeat: every 30 seconds by default.
+- Activity heartbeat: every 30 seconds by default; administrators can change it from Settings (5, 10, 15, 30, or 60 seconds).
+- Productive classification: only websites and applications added to the admin allowlists count as Productive; all other foreground activity is Unproductive unless the computer is genuinely idle.
 - Dashboard status: Online/Idle while a recent heartbeat exists; Offline after 90 seconds without one.
 - Screenshot capture: disabled by default. An administrator can enable it per employee.
 - Screenshot interval: default 300 seconds (5 minutes); the administrator can select a supported interval in Employee Details.
 - Immediate screenshot: an administrator can request one capture from Employee Details while the employee agent is online and screenshot capture is enabled.
-- The agent checks administrator-controlled screenshot settings every 30 seconds.
+- The agent checks administrator-controlled activity and screenshot settings every 15 seconds.
 - Screenshots are uploaded to the private \`screenshots\` Storage bucket.
 - Local diagnostic log: \`%LOCALAPPDATA%\\ActivityTrackAgent\\agent.log\`.
 
@@ -442,6 +546,7 @@ export default function AgentDownload() {
     { name: 'install.ps1', icon: Terminal, description: 'Installs the visible background agent and Windows sign-in startup task' },
     { name: 'turn_off.bat', icon: Settings, description: 'Stops the agent and disables automatic startup' },
     { name: 'requirements.txt', icon: FileText, description: 'Python dependencies' },
+    { name: 'browser-extension/', icon: Globe, description: 'Chrome/Edge companion for active website domain tracking' },
     { name: 'README.md', icon: FileText, description: 'Setup and usage instructions' },
   ];
 
@@ -629,7 +734,7 @@ export default function AgentDownload() {
               </li>
               <li className="flex items-center gap-2">
                 <span className="h-1.5 w-1.5 rounded-full bg-primary" />
-                Python 3.8+ <span className="text-muted-foreground">(auto-installed if missing)</span>
+                Python 3.10+ <span className="text-muted-foreground">(install before running setup.bat)</span>
               </li>
               <li className="flex items-center gap-2">
                 <span className="h-1.5 w-1.5 rounded-full bg-primary" />

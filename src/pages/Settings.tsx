@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -16,6 +16,77 @@ import { Loader2, Save, Sun, Moon, Plus, X, RotateCcw, Globe, AppWindow, Timer, 
 type Rules = { activity_interval_seconds: number; idle_threshold_seconds: number; productive_websites: string[]; productive_apps: string[] };
 const DEFAULT_RULES: Rules = { activity_interval_seconds: 30, idle_threshold_seconds: 300, productive_websites: [], productive_apps: [] };
 
+type RuleKind = 'productive_websites' | 'productive_apps';
+
+type RuleListProps = {
+  title: string;
+  description: string;
+  kind: RuleKind;
+  input: string;
+  setInput: (value: string) => void;
+  placeholder: string;
+  icon: typeof Globe;
+  values: string[];
+  onAdd: (kind: RuleKind) => void;
+  onRemove: (kind: RuleKind, value: string) => void;
+  inputRef: { current: HTMLInputElement | null };
+};
+
+// Keep this component outside Settings. Defining it inside Settings caused
+// React to unmount/remount the input on every keystroke, which lost focus.
+function RuleList({
+  title, description, kind, input, setInput, placeholder, icon: Icon,
+  values, onAdd, onRemove, inputRef,
+}: RuleListProps) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <Icon className="h-4 w-4 text-primary" />
+        <div>
+          <p className="font-medium">{title}</p>
+          <p className="text-xs text-muted-foreground">{description}</p>
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <Input
+          ref={inputRef}
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          placeholder={placeholder}
+          onKeyDown={e => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              onAdd(kind);
+            }
+          }}
+        />
+        <Button type="button" variant="outline" onClick={() => onAdd(kind)}>
+          <Plus className="h-4 w-4 mr-1" />Add
+        </Button>
+      </div>
+      <div className="flex flex-wrap gap-2 min-h-8">
+        {values.map(value => (
+          <Badge key={value} variant="secondary" className="gap-1 py-1.5">
+            {value}
+            <button
+              type="button"
+              aria-label={`Remove ${value}`}
+              onClick={() => onRemove(kind, value)}
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </Badge>
+        ))}
+        {values.length === 0 && (
+          <span className="text-xs text-muted-foreground">
+            No productive entries yet. Everything not listed will be unproductive.
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Settings() {
   const { user } = useAuth();
   const { theme, setTheme } = useTheme();
@@ -25,6 +96,8 @@ export default function Settings() {
   const [loaded, setLoaded] = useState(false);
   const [websiteInput, setWebsiteInput] = useState('');
   const [appInput, setAppInput] = useState('');
+  const websiteInputRef = useRef<HTMLInputElement>(null);
+  const appInputRef = useRef<HTMLInputElement>(null);
   const [resetting, setResetting] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -90,22 +163,9 @@ export default function Settings() {
     setLoading(false);
   };
 
-  const RuleList = ({ title, description, kind, input, setInput, placeholder, icon: Icon }: {
-    title: string; description: string; kind: 'productive_websites' | 'productive_apps'; input: string;
-    setInput: (v: string) => void; placeholder: string; icon: typeof Globe;
-  }) => (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2"><Icon className="h-4 w-4 text-primary"/><div><p className="font-medium">{title}</p><p className="text-xs text-muted-foreground">{description}</p></div></div>
-      <div className="flex gap-2">
-        <Input value={input} onChange={e => setInput(e.target.value)} placeholder={placeholder} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addValue(kind); } }} />
-        <Button type="button" variant="outline" onClick={() => addValue(kind)}><Plus className="h-4 w-4 mr-1"/>Add</Button>
-      </div>
-      <div className="flex flex-wrap gap-2 min-h-8">
-        {rules[kind].map(value => <Badge key={value} variant="secondary" className="gap-1 py-1.5">{value}<button type="button" aria-label={`Remove ${value}`} onClick={() => setRules(prev => ({ ...prev, [kind]: prev[kind].filter(v => v !== value) }))}><X className="h-3 w-3"/></button></Badge>)}
-        {rules[kind].length === 0 && <span className="text-xs text-muted-foreground">No productive entries yet. Everything not listed will be unproductive.</span>}
-      </div>
-    </div>
-  );
+  const removeValue = (kind: RuleKind, value: string) => {
+    setRules(prev => ({ ...prev, [kind]: prev[kind].filter(v => v !== value) }));
+  };
 
   return (
     <DashboardLayout>
@@ -123,9 +183,33 @@ export default function Settings() {
         <Card>
           <CardHeader><CardTitle>Productivity Rules</CardTitle><CardDescription>Only entries in these two allowlists count as Productive. Everything else is Unproductive unless the computer is genuinely idle or locked.</CardDescription></CardHeader>
           <CardContent className="space-y-6">
-            <RuleList title="Productive Websites" description="Add domains, e.g. adobe.com. Subdomains are included automatically." kind="productive_websites" input={websiteInput} setInput={setWebsiteInput} placeholder="example.com" icon={Globe}/>
+            <RuleList
+              title="Productive Websites"
+              description="Add domains, e.g. adobe.com. Subdomains are included automatically."
+              kind="productive_websites"
+              input={websiteInput}
+              setInput={setWebsiteInput}
+              placeholder="example.com"
+              icon={Globe}
+              values={rules.productive_websites}
+              onAdd={addValue}
+              onRemove={removeValue}
+              inputRef={websiteInputRef}
+            />
             <div className="border-t"/>
-            <RuleList title="Productive Applications" description="Add Windows process names, with or without .exe." kind="productive_apps" input={appInput} setInput={setAppInput} placeholder="Photoshop.exe or explorer.exe" icon={AppWindow}/>
+            <RuleList
+              title="Productive Applications"
+              description="Add Windows process names, with or without .exe."
+              kind="productive_apps"
+              input={appInput}
+              setInput={setAppInput}
+              placeholder="Photoshop.exe or explorer.exe"
+              icon={AppWindow}
+              values={rules.productive_apps}
+              onAdd={addValue}
+              onRemove={removeValue}
+              inputRef={appInputRef}
+            />
             <div className="rounded-md bg-muted p-3 text-sm text-muted-foreground">Classification priority: genuine Idle → Idle; matching website domain or application process → Productive; all other foreground activity → Unproductive.</div>
             <Button onClick={saveRules} disabled={loading || !loaded}>{loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin"/> : <Save className="h-4 w-4 mr-2"/>}Save Activity Settings</Button>
           </CardContent>
